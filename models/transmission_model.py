@@ -130,8 +130,11 @@ class GeneralSpatialTransmissionModel:
         # comp_mat_diag = torch.diag(comp_mat)
         n_event = Binomial(total_count=comp_mat_diag, probs=p).sample()
 
-        # Probability of traveling from i to j given travel:
-        M_out_norm = M_out / rate_mat_sum[..., None]
+        # Probability of traveling from i to j given travel; an origin with
+        # no outflow has no departures, so its row is zero, not 0 / 0
+        M_out_norm = torch.where(rate_mat_sum[..., None] > 0,
+                                 M_out / rate_mat_sum[..., None],
+                                 torch.zeros_like(M_out))
 
         #print(n_event)
         #print(M_out_norm)
