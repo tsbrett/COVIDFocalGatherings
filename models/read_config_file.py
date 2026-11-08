@@ -68,7 +68,8 @@ def get_model_tensors(data_dict, origin_date,  fips_codes=None):
     social_distancing_start_month = social_distancing_start_date.month
     # I don't like that this is in units of months
     fixed_reduction_tensor = torch.zeros(size=(local_tensor.shape[0],))
-    fixed_reduction_tensor[social_distancing_start_month:] = 1
+    # months are 1-based, the tensor's index 0-based
+    fixed_reduction_tensor[social_distancing_start_month - 1:] = 1
 
     return dict(local_tensor=local_tensor,
                 M_out_tensor=M_out_tensor,

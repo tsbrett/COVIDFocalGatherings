@@ -369,8 +369,10 @@ class GeneralSpatialTransmissionModel:
 
             while t < tf:
 
-                if (m < self.month_start_tensor.shape[0]
-                        and t > self.month_start_tensor[m]):
+                # m indexes the month t falls in: it advances when t reaches
+                # the next month's first day, and stops at the last month
+                if (m + 1 < self.month_start_tensor.shape[0]
+                        and t >= self.month_start_tensor[m + 1]):
                     m += 1
 
                 if not outbreak_seeded and t >= self.seed_day:
