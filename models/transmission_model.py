@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import torch
 from torch.distributions.binomial import Binomial
@@ -193,13 +195,16 @@ class GeneralSpatialTransmissionModel:
 
     def importance_sampling(self, t, y_prev, par_prev, y_obs):
 
-        # Importance weight
-        weights = self.reporting_model_prob(t, y=y_prev, par=par_prev,
-                                            y_obs=y_obs, give_log=False)
+        # Importance weights, kept as logs: the product of every county's
+        # likelihood underflows to 0 when exponentiated on a large network
+        log_weights = self.reporting_model_prob(t, y=y_prev, par=par_prev,
+                                                y_obs=y_obs, give_log=True)
 
-        conditional_log_likelihood = torch.log(weights.mean())
+        conditional_log_likelihood = (torch.logsumexp(log_weights, dim=0)
+                                      - math.log(log_weights.shape[0]))
 
-        resampled_index = Categorical(weights).sample((self.n_particles,))
+        resampled_index = Categorical(logits=log_weights).sample(
+            (self.n_particles,))
 
         y = y_prev[resampled_index]
         par = par_prev[resampled_index]
@@ -346,9 +351,13 @@ class GeneralSpatialTransmissionModel:
                                         par_tensor.shape[-1]),
                                    dtype=torch.float64)
 
+        # the log-likelihood estimate of each pass of the filter
+        self.log_likelihood = []
+
         for n in range(0, Nmif) if Nmif is not None else range(1):
             # Initialise state and output tensor
             t = t0
+            log_likelihood = 0.
             y = y0  # self.initialise_model(N_vector=N_vector)
             i = 0
 
@@ -398,6 +407,7 @@ class GeneralSpatialTransmissionModel:
                                                               y_obs=y_obs[i])
 
                         y, par_tensor, cond_log_likelihood = imp_sample
+                        log_likelihood += float(cond_log_likelihood)
 
                         if Nmif is not None:
                             n_obs = len(y_obs)
@@ -412,6 +422,9 @@ class GeneralSpatialTransmissionModel:
                     i += 1
 
                 print(t)
+
+            if y_obs is not None:
+                self.log_likelihood.append(log_likelihood)
 
         if Nmif is None:
             return y_out, obs_out
