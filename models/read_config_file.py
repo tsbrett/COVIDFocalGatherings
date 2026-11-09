@@ -63,19 +63,11 @@ def get_model_tensors(data_dict, origin_date,  fips_codes=None):
     unscaled_M_back_tensor = (torch.ones(size=(n_counties, n_counties))
                               - torch.eye(n_counties))
 
-    sd_parameters = simulation_parameters["social_distancing_parameters"]
-    social_distancing_start_date = sd_parameters["social_distancing_start_date"]
-    social_distancing_start_month = social_distancing_start_date.month
-    # I don't like that this is in units of months
-    fixed_reduction_tensor = torch.zeros(size=(local_tensor.shape[0],))
-    fixed_reduction_tensor[social_distancing_start_month:] = 1
-
     return dict(local_tensor=local_tensor,
                 M_out_tensor=M_out_tensor,
                 unscaled_M_back_tensor=unscaled_M_back_tensor,
                 population_size_tensor=N_vector,
                 month_start_tensor=month_start_tensor,
-                fixed_reduction_tensor=fixed_reduction_tensor,
                 location_names=df_pop[["fips", "name"]])
 
 
@@ -110,20 +102,39 @@ seed_counties = (model_tensors_dict["location_names"]
                  .values)  # Convert to index
 seed_day = (pd.to_datetime(os_parameters["seed_date"]) - origin_date).days
 
+# The day fixed_reduction_coef's reduction starts
+sd_parameters = simulation_parameters["social_distancing_parameters"]
+reduction_start_day = (pd.to_datetime(
+    sd_parameters["social_distancing_start_date"]) - origin_date).days
+
+reporting_parameters = simulation_parameters["reporting_parameters"]
+
+# Epidemiological parameters (used to define parameters for simulation/inference run)
+
+par_dict = config["default_model_parameters"]
+
+# Iterated filtering: each parameter's random-walk sd (0 where it does not
+# walk), in par_dict's order, and the sd's cooling
+if_parameters = config["iterated_filtering_parameters"]
+unknown = set(if_parameters["par_sd"]) - set(par_dict)
+if unknown:
+    raise KeyError(f"par_sd names no model parameter: {sorted(unknown)}")
+rw_sd = [float(if_parameters["par_sd"].get(name, 0.)) for name in par_dict]
+
 fixed_par_dict = dict(timestep=simulation_parameters["timestep"],
                       seed_day=seed_day,
                       seed_size=os_parameters["seed_size"],
                       seed_counties=seed_counties,
                       t_eval=t_eval_day,
                       t0=simulation_parameters["start_day"],
-                      tf=simulation_parameters["end_day"]
+                      tf=simulation_parameters["end_day"],
+                      reduction_start_day=reduction_start_day,
+                      death_delay_weeks=reporting_parameters[
+                          "death_delay_weeks"],
+                      mean_floor=float(reporting_parameters["mean_floor"]),
+                      rw_sd=rw_sd,
+                      rw_alpha=float(if_parameters["alpha"]),
                       )
-
-
-
-# Epidemiological parameters (used to define parameters for simulation/inference run)
-
-par_dict = config["default_model_parameters"]
 
 
 

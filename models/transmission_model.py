@@ -1,3 +1,5 @@
+from collections import deque
+
 import numpy as np
 import torch
 from torch.distributions.binomial import Binomial
@@ -13,7 +15,6 @@ class GeneralSpatialTransmissionModel:
                  seed_size,
                  population_size_tensor,
                  local_tensor,
-                 fixed_reduction_tensor,
                  M_out_tensor,
                  unscaled_M_back_tensor,
                  month_start_tensor,
@@ -22,8 +23,13 @@ class GeneralSpatialTransmissionModel:
                  tf,
                  t_eval,
                  numpy_rng,
+                 reduction_start_day,
                  n_particles=1,
-                 timestep=1,):
+                 timestep=1,
+                 death_delay_weeks=0,
+                 mean_floor=1e-5,
+                 rw_sd=None,
+                 rw_alpha=1.,):
 
         self.numpy_rng = numpy_rng
 
@@ -41,7 +47,8 @@ class GeneralSpatialTransmissionModel:
 
         self.population_size_tensor = population_size_tensor
         self.local_tensor = local_tensor
-        self.fixed_reduction_tensor = fixed_reduction_tensor
+        # the day fixed_reduction_coef's reduction starts
+        self.reduction_start_day = reduction_start_day
         self.M_out_tensor = M_out_tensor
         self.unscaled_M_back_tensor = unscaled_M_back_tensor
         self.month_start_tensor = month_start_tensor
@@ -52,8 +59,16 @@ class GeneralSpatialTransmissionModel:
         self.tensor_size = (self.n_particles, self.n_compartments,
                             self.n_c, self.n_c)
 
-        self.par_sd = 1e-3
-        self.alpha = 0.8
+        # weeks from removals to reported deaths, and the floor on each
+        # county's expected deaths
+        self.death_delay_weeks = death_delay_weeks
+        self.mean_floor = mean_floor
+        # iterated filtering: each parameter's random-walk sd, and its cooling
+        self.rw_sd = None if rw_sd is None else torch.tensor(rw_sd)
+        self.rw_alpha = rw_alpha
+        # each particle's weekly removals by residence, the last
+        # death_delay_weeks + 1 weeks, oldest first
+        self.removed_history = deque(maxlen=death_delay_weeks + 1)
 
 
     def initialise_model(self):
@@ -92,21 +107,25 @@ class GeneralSpatialTransmissionModel:
         y[:, indicies] = 0
         return y
 
-    def get_connectivity_tensors(self, m, par):
+    def get_connectivity_tensors(self, m, par, t):
         """
         Make function depend on model parameters.
         :param m: index of month
+        :param t: time, for the start of the fixed reduction
         :return:
         """
 
         mean_trip_duration = par[:, 7]
         local_coef = par[:, 8]
         fixed_reduction_coef = par[:, 9]
+        travel_scale = par[:, 11]
 
         M_out = self.M_out_tensor[m]
         M_back = self.unscaled_M_back_tensor  # Assumed constant throughout
 
         M_out = torch.tile(M_out[None, :, :], dims=(self.n_particles, 1, 1))
+        # each particle's travel rates scaled by its travel_scale
+        M_out = M_out * travel_scale[:, None, None]
 
         M_back = torch.tile(M_back[None, :, :], dims=(self.n_particles, 1, 1))
         M_back *= 1. / mean_trip_duration[:, None, None]  # Multiply by mean
@@ -114,7 +133,7 @@ class GeneralSpatialTransmissionModel:
 
         local_exponent = (local_coef[:, None] * self.local_tensor[m][None, :]
                           - fixed_reduction_coef[:, None]
-                          * self.fixed_reduction_tensor[m])
+                          * float(t >= self.reduction_start_day))
         local_contact = torch.exp(local_exponent)
 
         return M_out, M_back,  local_contact
@@ -173,16 +192,45 @@ class GeneralSpatialTransmissionModel:
         return (self.net_movement_out(comp_mat, M_out)
                 + self.net_movement_back(comp_mat, M_back))
 
+    def record_removed(self, y):
+        """
+        Add the week's removals by residence to the history the reported
+        deaths are drawn from, the weeks before the first counted as 0.
+        :param y: state tensor
+        """
+        removed = y[:, 4].sum(axis=-1)
+        if not self.removed_history:
+            self.removed_history.extend(
+                [torch.zeros_like(removed)] * self.death_delay_weeks)
+        self.removed_history.append(removed)
+
+    def resample_history(self, index):
+        """
+        Keep the removals history with its particles after resampling.
+        :param index: each new particle's old particle
+        """
+        self.removed_history = deque((h[index] for h in self.removed_history),
+                                     maxlen=self.removed_history.maxlen)
+
+    def get_removed(self, y):
+        """
+        The removals (I to R) by residence whose deaths are reported this
+        week: this week's, or death_delay_weeks back (record_removed).
+        :param y: state tensor
+        :return: (particles, counties) tensor
+        """
+        if self.death_delay_weeks == 0:
+            return y[:, 4].sum(axis=-1)
+        return self.removed_history[0]
+
     def reporting_model(self, y, par):
 
         rep_prob = par[:, 4][:, None]
-        new_infections_by_residence = y[:, 4].sum(axis=-1)
-        eps_tol = 1e-5
-        mu = new_infections_by_residence * rep_prob + eps_tol
-        tau = 0.1
+        dispersion = par[:, 10][:, None]
+        mu = self.get_removed(y) * rep_prob + self.mean_floor
 
-        return NegativeBinomial(total_count=1. / tau,
-                                probs=1 - 1. / (tau * mu + 1.),)
+        return NegativeBinomial(total_count=1. / dispersion,
+                                probs=1 - 1. / (dispersion * mu + 1.),)
 
     def reporting_model_prob(self, t, y, par, y_obs, give_log=True):
 
@@ -203,6 +251,7 @@ class GeneralSpatialTransmissionModel:
 
         y = y_prev[resampled_index]
         par = par_prev[resampled_index]
+        self.resample_history(resampled_index)
 
         return y, par, conditional_log_likelihood
 
@@ -211,10 +260,6 @@ class GeneralSpatialTransmissionModel:
         log_indices = [0, 1, 2, 3]
         logit_indices = [4]
 
-        rw_sd = torch.zeros(size=(par.shape[1],))
-        rw_sd[0] = 1e-2
-        rw_sd[8] = 1e-2
-        rw_sd[9] = 1e-2
         rw_indices = (rw_sd > 0).nonzero()
 
         par[:, log_indices] = torch.log(par[:, log_indices])
@@ -361,9 +406,11 @@ class GeneralSpatialTransmissionModel:
 
             m = 0  # Month counter
 
+            self.removed_history.clear()
+
             # Initialized using first month's data
             M_out, M_back, local_contact = (
-                self.get_connectivity_tensors(m, par_tensor))
+                self.get_connectivity_tensors(m, par_tensor, t))
 
             outbreak_seeded = False  # logical condition
 
@@ -378,7 +425,7 @@ class GeneralSpatialTransmissionModel:
                     outbreak_seeded = True
 
                 M_out, M_back, local_contact = (
-                    self.get_connectivity_tensors(m, par_tensor))
+                    self.get_connectivity_tensors(m, par_tensor, t))
 
                 y = self.process_model(t=t, X=y, par=par_tensor,
                                        M_out=M_out, M_back=M_back,
@@ -388,6 +435,8 @@ class GeneralSpatialTransmissionModel:
                 if (i < len(t_eval)) and (t > t_eval[i]):
                     y_reduced = y.sum(dim=-1)
                     y_out[i] = y_reduced
+                    if self.death_delay_weeks:
+                        self.record_removed(y)
                     obs_out[i] = self.reporting_model(y=y,
                                                       par=par_tensor).sample()
 
@@ -402,7 +451,7 @@ class GeneralSpatialTransmissionModel:
                         if Nmif is not None:
                             n_obs = len(y_obs)
                             rw_exponent = (i + n_obs * n) / (n_obs * Nmif)
-                            rw_sd = self.par_sd * self.alpha ** rw_exponent
+                            rw_sd = self.rw_sd * self.rw_alpha ** rw_exponent
                             par_tensor = self.parameter_random_walk(t=t,
                                                                     par=par_tensor,
                                                                     rw_sd=rw_sd)

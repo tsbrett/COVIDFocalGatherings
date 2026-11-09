@@ -14,7 +14,10 @@ simulation_parameters:
   #network_fips_codes: [36005, 36047, 36061, 36081, 36085] # List of FIPS codes of simulation network
   network_fips_codes: [53033, 53053, 53061, 53063, 53011, 53067]
   social_distancing_parameters:
-    social_distancing_start_date: 2020-03-01
+    social_distancing_start_date: 2020-03-01  # First day of fixed_reduction_coef's reduction
+  reporting_parameters:
+    death_delay_weeks: 0  # Weeks from a week's removals (I to R) to their reported deaths
+    mean_floor: 1.0e-5  # Added to every county's expected deaths, so none is exactly 0
   outbreak_seeding_parameters:
     seed_fips_codes: [53033] # List of FIPS codes where outbreak is seeded
     seed_date: 2020-02-12
@@ -31,9 +34,13 @@ default_model_parameters: # Note: code is not robust to changes in order of this
   mean_trip_duration: 2.  # Average duration of movement outside home county
   local_coef: 0.5  # Coefficient for local transmission reduction data (0 = no reduction)
   fixed_reduction_coef: 0.4  # Constant reduction to contact rates after social distancing start (constant across space and time)
+  reporting_dispersion: 0.1  # Negative binomial dispersion of reported deaths (variance mu + dispersion * mu^2)
+  travel_scale: 1.  # Multiplies every county's rate of departure from the travel data (1 = the data's rates)
 
 iterated_filtering_parameters:
-  par_sd:
-    R0: 1e-3
-  alpha: 0.8
+  par_sd:  # Random-walk sd per parameter, on the log scale for the first four, logit for reporting_probability
+    R0: 1.0e-2
+    local_coef: 1.0e-2
+    fixed_reduction_coef: 1.0e-2
+  alpha: 1.  # Cooling: the sd is par_sd * alpha ** (fraction of the passes done)
 
