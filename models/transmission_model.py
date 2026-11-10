@@ -23,11 +23,17 @@ class GeneralSpatialTransmissionModel:
                  t_eval,
                  numpy_rng,
                  n_particles=1,
-                 timestep=1,):
+                 timestep=1,
+                 stage_means="exact"):
 
         self.numpy_rng = numpy_rng
 
         self.timestep = timestep
+        # how a stage's mean period becomes its exit probability per step
+        # (get_exit): "exact" or "rate"
+        if stage_means not in ("exact", "rate"):
+            raise ValueError(f"stage_means {stage_means!r}: exact or rate")
+        self.stage_means = stage_means
         self.t_eval = t_eval
         self.t0 = t0
         self.tf = tf
@@ -158,10 +164,23 @@ class GeneralSpatialTransmissionModel:
 
         return out
 
+    def get_exit(self, rate):
+        """
+        A stage's exit probability per step, from its rate, 1 / its mean
+        period: "exact" gives timestep x rate, so the stage lasts its mean
+        period on average; "rate" gives 1 - exp(-timestep x rate), the
+        hazard's, whose stage lasts about half a step longer.
+        :param rate: the stage's exit rate, per day
+        :return: tensor of probabilities
+        """
+        if self.stage_means == "exact":
+            return torch.clamp(self.timestep * rate, max=1.)
+        return 1 - torch.exp(-self.timestep * rate)
+
     def net_movement_back(self, comp_mat, M_back):
 
         #  Binomial sampling for return movement
-        p = 1 - torch.exp(-self.timestep * M_back)
+        p = self.get_exit(rate=M_back)
 
         back = Binomial(total_count=comp_mat, probs=p).sample()
 
@@ -287,8 +306,8 @@ class GeneralSpatialTransmissionModel:
         ones_mat = torch.ones(size=(self.n_particles, self.n_c, self.n_c))
 
         p_S = 1 - torch.exp(-delta * foi_tile)
-        p_E = 1 - torch.exp(-delta * kappa[:, None, None] * ones_mat)
-        p_I = 1 - torch.exp(-delta * gamma[:, None, None] * ones_mat)
+        p_E = self.get_exit(rate=kappa[:, None, None] * ones_mat)
+        p_I = self.get_exit(rate=gamma[:, None, None] * ones_mat)
         p_R = 1 - torch.exp(-delta * mu[:, None, None] * ones_mat)
 
 
